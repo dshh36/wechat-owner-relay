@@ -1,4 +1,6 @@
 import tempfile
+import copy
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -14,6 +16,99 @@ def line(text, x, y, score=0.99):
 
 
 class WatcherTests(unittest.TestCase):
+    def test_read_retries_transient_status_file_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "status.json"
+            path.write_text('{"status":"running"}', encoding="utf-8")
+            with patch.object(Path, "read_text", side_effect=[PermissionError(), '{"status":"running"}']), \
+                    patch.object(watcher.time, "sleep"):
+                self.assertEqual(watcher.load(path, {}), {"status": "running"})
+
+    def test_maximized_border_translation_matches_original_avatar(self):
+        from PIL import Image
+        import random
+        rng = random.Random(42)
+        baseline = Image.frombytes("RGB", (350, 450), rng.randbytes(350 * 450 * 3))
+        state = {"scale": 1, "avatar": watcher.avatar_signature(baseline, 1)}
+        moved = Image.new("RGB", (600, 700))
+        moved.paste(baseline, (8, 8))
+        aligned, scale, origin = watcher.approved_layout(moved, state, 1)
+        self.assertEqual(scale, 1)
+        self.assertEqual(origin, [8, 8])
+        self.assertEqual(watcher.avatar_signature(aligned, 1), state["avatar"])
+
+    def test_recovery_keeps_new_reply_and_baselines_newly_exposed_history(self):
+        old = {"contact_candidate": "friend", "preview": "old", "displayed_time": "10:00"}
+        new = {**old, "preview": "reply", "displayed_time": "10:01"}
+        history = {**old, "contact_candidate": "another"}
+        state = {"seen": []}
+        rebase_previews([old], state)
+        self.assertEqual(watcher.recovered_candidates([new, history], state), [new])
+        self.assertEqual(fresh_candidates([new, history], state), [])
+
+    def test_scale_change_requires_original_avatar_and_keeps_baseline(self):
+        state = {"scale": 1.5, "avatar": [90] * 192}
+        before = copy.deepcopy(state)
+        with patch.object(watcher, "avatar_signature", side_effect=lambda image, scale:
+                          [90 if scale == 1 else 170] * 192):
+            self.assertEqual(watcher.approved_scale(None, state, 1), 1)
+            self.assertIsNone(watcher.approved_scale(None, state, 2))
+        self.assertEqual(state, before)
+
+    def run_adaptive_scan(self, size, scale, identity_changed=False, avatar_changed=False):
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old = {"contact_candidate": "friend", "preview": "old", "displayed_time": "10:00"}
+            state = {"hwnd": 10, "pid": 20, "size": [1342, 1230], "scale": 1.5,
+                     "avatar": [90] * 192, "window_identity": {"exe": "approved"}, "seen": []}
+            rebase_previews([old], state)
+            paths = {name: root / (name + ".json") for name in ("STATE", "QUEUE", "STATUS")}
+            watcher.save(paths["STATE"], state)
+            watcher.save(paths["QUEUE"], [])
+            lines = [line("friend", 140 * scale, 100 * scale),
+                     line("10:01", 274 * scale, 100 * scale),
+                     line("reply", 160 * scale, 122 * scale)]
+            from contextlib import ExitStack
+            with ExitStack() as stack:
+                for name, path in paths.items():
+                    stack.enter_context(patch.object(watcher, name, path))
+                stack.enter_context(patch.object(watcher, "ROOT", root))
+                stack.enter_context(patch.object(watcher, "STOP", root / "STOP"))
+                stack.enter_context(patch.object(sys, "argv", ["watcher", "--scan"]))
+                stack.enter_context(patch.object(watcher, "scan_window", return_value=(
+                    11, Image.new("RGB", size), 21,
+                    {"exe": "different" if identity_changed else "approved"})))
+                stack.enter_context(patch.object(watcher, "window_scale", return_value=scale))
+                stack.enter_context(patch.object(watcher.time, "sleep"))
+                stack.enter_context(patch.object(watcher, "avatar_signature",
+                                               return_value=[170 if avatar_changed else 90] * 192))
+                ocr = stack.enter_context(patch.object(watcher, "read_ocr", return_value=lines))
+                watcher.main()
+            return (watcher.load(paths["STATUS"], {}), watcher.load(paths["STATE"], {}),
+                    watcher.load(paths["QUEUE"], []), ocr.call_count, state)
+
+    def test_resized_restarted_and_dpi_changed_window_recovers(self):
+        for size, scale in (((883, 815), 1), ((1500, 1100), 1.5), ((1766, 1630), 2)):
+            with self.subTest(size=size, scale=scale):
+                status, state, queue, calls, original = self.run_adaptive_scan(size, scale)
+                self.assertEqual(status["status"], "scan_ok")
+                self.assertTrue(status["layout_adapted"])
+                self.assertEqual(state["size"], list(size))
+                self.assertEqual(state["scale"], scale)
+                self.assertEqual(state["hwnd"], 11)
+                self.assertEqual(state["avatar"], original["avatar"])
+                self.assertEqual([event["preview"] for event in queue], ["reply"])
+
+    def test_changed_identity_never_updates_state_or_reads_chats(self):
+        for flags in ({"identity_changed": True}, {"avatar_changed": True}):
+            with self.subTest(flags=flags):
+                status, state, queue, calls, original = self.run_adaptive_scan((883, 815), 1, **flags)
+                self.assertEqual(status["status"], "paused")
+                self.assertEqual(state, original)
+                self.assertEqual(queue, [])
+                self.assertEqual(calls, 0)
+
     def test_save_retries_transient_permission_error(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "status.json"

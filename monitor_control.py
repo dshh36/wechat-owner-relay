@@ -258,7 +258,7 @@ def detector_label(current):
     if current["status"] == "waiting_for_window":
         if current.get("reason") == "RuntimeError: Pinned WeChat window is missing or minimized":
             return "检测已开启，已绑定的微信窗口不可用"
-        return "检测已开启，等待微信恢复原窗口大小和聊天列表"
+        return "检测已开启，正在自动重试读取微信聊天列表"
     if current["status"] == "paused":
         return "检测已暂停：" + str(current.get("reason") or "请检查微信账号和窗口")
     if current["status"] == "starting":

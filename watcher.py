@@ -51,7 +51,13 @@ def save(path, value):
 
 
 def load(path, default):
-    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else default
+    for attempt in range(8):
+        try:
+            return json.loads(path.read_text(encoding="utf-8")) if path.exists() else default
+        except PermissionError:
+            if attempt == 7:
+                raise
+            time.sleep(min(0.1 * (2 ** attempt), 1.0))
 
 
 def digest(value):
@@ -162,9 +168,11 @@ def scan_window(hwnd, state, auto_recover):
     return hwnd, image, pid, identity
 
 
-def avatar_signature(image, scale):
+def avatar_signature(image, scale, offset=(0, 0)):
     # Pin the current user-approved session; a changed avatar pauses monitoring.
-    box = tuple(round(v * scale) for v in (14, 42, 48, 76))
+    dx, dy = offset
+    box = tuple(round(v * scale) + (dx if i % 2 == 0 else dy)
+                for i, v in enumerate((14, 42, 48, 76)))
     thumb = image.crop(box).resize((8, 8)).convert("RGB")
     return list(thumb.tobytes())
 
@@ -173,6 +181,55 @@ def avatar_matches(expected, actual):
     if len(expected) != len(actual) or not expected:
         return False
     return sum(abs(a - b) for a, b in zip(expected, actual)) / len(expected) < 12
+
+
+def window_scale(hwnd):
+    """Read the current window DPI, rather than inferring it from its size."""
+    try:
+        get_dpi = ctypes.windll.user32.GetDpiForWindow
+        get_dpi.argtypes = [ctypes.c_void_p]
+        get_dpi.restype = ctypes.c_uint
+        dpi = get_dpi(hwnd)
+        return dpi / 96 if dpi else None
+    except (AttributeError, OSError):
+        return None
+
+
+def approved_scale(image, state, current_scale):
+    # Never replace the approved avatar with an unverified new baseline.
+    for scale in dict.fromkeys([current_scale, state["scale"]]):
+        if scale and avatar_matches(state["avatar"], avatar_signature(image, scale)):
+            return scale
+    return None
+
+
+def approved_layout(image, state, current_scale):
+    """Compensate for the invisible Windows resize border on maximization."""
+    scales = list(dict.fromkeys([current_scale, state["scale"]]))
+    origin = state.get("layout_origin", [0, 0])
+
+    def shifted(dx, dy):
+        return image.crop((dx, dy, image.width + dx, image.height + dy))
+
+    aligned = shifted(*origin)
+    scale = approved_scale(aligned, state, current_scale)
+    if scale is not None:
+        return aligned, scale, origin
+    best = None
+    for scale in scales:
+        if not scale:
+            continue
+        # Search only a border-sized translation, never arbitrary avatar locations.
+        for dx in range(-12, 13, 2):
+            for dy in range(-12, 13, 2):
+                actual = avatar_signature(image, scale, (dx, dy))
+                expected = state["avatar"]
+                if not avatar_matches(expected, actual):
+                    continue
+                error = sum(abs(a - b) for a, b in zip(expected, actual)) / len(expected)
+                if best is None or error < best[0]:
+                    best = (error, scale, [dx, dy])
+    return (shifted(*best[2]), best[1], best[2]) if best else (image, None, origin)
 
 
 def read_ocr(image):
@@ -195,7 +252,7 @@ def read_ocr(image):
 
 
 def parse_previews(lines, width, height, scale):
-    """Fixed baseline geometry; resizing requires explicit recalibration."""
+    """Sidebar geometry is in logical pixels; window size may change freely."""
     rows = defaultdict(list)
     for line in lines:
         x, y = line["x"] / scale, line["y"] / scale
@@ -287,6 +344,23 @@ def rebase_previews(previews, state):
     state["seen"] = list(dict.fromkeys(
         state.get("seen", []) + [preview_key(item) for item in previews]
     ))[-2000:]
+
+
+def recovered_candidates(previews, state):
+    """Compare known chats on recovery; newly exposed rows are only a baseline."""
+    previous = state.get("last_previews", {})
+    known = [item for item in previews if item["contact_candidate"] in previous]
+    exposed = [item for item in previews if item["contact_candidate"] not in previous]
+    fresh = fresh_candidates(known, state)
+    # Keep the prior observations for contacts outside the resized viewport.
+    for item in exposed:
+        state["last_previews"][item["contact_candidate"]] = {
+            "preview": item["preview"], "displayed_time": item["displayed_time"],
+        }
+    state["seen"] = list(dict.fromkeys(
+        state["seen"] + [preview_key(item) for item in exposed]
+    ))[-2000:]
+    return fresh
 
 
 def report(status, **fields):
@@ -391,16 +465,24 @@ def main():
     if args.snapshot:
         image.save(ROOT / "diagnostic.png")
     scale = args.scale if args.initialize else state["scale"]
-    signature = avatar_signature(image, scale)
+    origin = [0, 0]
+    signature = avatar_signature(image, scale) if args.initialize else None
     if not args.initialize:
         if (not args.rebind and (pid != state["pid"] or hwnd != state["hwnd"])
                 and (not auto_recover or identity != state.get("window_identity"))):
             report("paused", reason="Window session changed; identity verification required")
             return
-        if list(image.size) != state["size"] and not (args.recalibrate or args.rebind):
-            report("paused", reason="Window session or size changed; recalibration required")
-            return
-        if not avatar_matches(state["avatar"], signature):
+        image, scale, origin = approved_layout(image, state, window_scale(hwnd))
+        # Maximize/restore animations can briefly yield an intermediate frame.
+        for attempt in range(2):
+            if scale is not None:
+                break
+            time.sleep(0.35)
+            retry_hwnd, retry_image, retry_pid, retry_identity = scan_window(hwnd, state, auto_recover)
+            if (retry_hwnd, retry_pid, retry_identity) != (hwnd, pid, identity):
+                raise RuntimeError(WINDOW_UNAVAILABLE)
+            image, scale, origin = approved_layout(retry_image, state, window_scale(hwnd))
+        if scale is None:
             report("paused", reason="Account avatar changed; identity verification required")
             return
     lines = read_ocr(image)
@@ -409,13 +491,11 @@ def main():
         report("paused", reason="No reliable sidebar previews; OCR/calibration not verified")
         return
     if args.rebind:
-        state.update(hwnd=hwnd, pid=pid, size=list(image.size), window_identity=identity)
+        state.update(hwnd=hwnd, pid=pid, size=list(image.size), scale=scale,
+                     window_identity=identity, layout_origin=origin, rebase_on_next_scan=True)
         save(STATE, state)
         report("baseline_rebound", visible_rows=len(previews))
         return
-    if args.recalibrate:
-        state.update(size=list(image.size), window_identity=identity)
-        save(STATE, state)
     if args.initialize:
         state = {
             "hwnd": hwnd, "pid": pid, "size": list(image.size), "scale": scale,
@@ -427,24 +507,18 @@ def main():
             save(QUEUE, [])
         report("baseline_ready", visible_rows=len(previews), previews=previews)
         return
+    layout_changed = (list(image.size) != state["size"] or scale != state["scale"]
+                      or origin != state.get("layout_origin", [0, 0]))
+    recovery_pending = state.pop("rebase_on_next_scan", False)
     rebound = (
         hwnd != state["hwnd"]
         or pid != state["pid"]
-        or state.pop("rebase_on_next_scan", False)
+        or recovery_pending
     )
-    state.update(hwnd=hwnd, pid=pid)
+    state.update(hwnd=hwnd, pid=pid, size=list(image.size), scale=scale, layout_origin=origin)
     state.setdefault("window_identity", identity)
-    if rebound:
-        rebase_previews(previews, state)
-        queue = load(QUEUE, [])
-        save(QUEUE, queue)
-        save(STATE, state)
-        report(
-            "scan_ok", new_candidates=0, window_rebound=True,
-            pending=sum(e["state"] == "needs_verification" for e in queue),
-        )
-        return
-    fresh = fresh_candidates(previews, state)
+    fresh = (recovered_candidates(previews, state) if rebound or layout_changed
+             else fresh_candidates(previews, state))
     queue = load(QUEUE, [])
     ids = {event["id"] for event in queue}
     for item in fresh:
@@ -460,6 +534,7 @@ def main():
         image.save(ROOT / "diagnostic.png")
     report(
         "scan_ok", new_candidates=len(fresh), window_rebound=rebound,
+        layout_adapted=layout_changed,
         pending=sum(e["state"] == "needs_verification" for e in queue),
     )
 
