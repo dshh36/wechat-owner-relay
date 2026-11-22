@@ -1,0 +1,19 @@
+# Local configuration and message/state files are deliberately never published.
+/*.json
+/*.log
+/*.txt
+!/requirements.txt
+/*.png
+/*.lock
+/STOP
+/CLAWBOT_STOP
+/.tmp-*
+/.venv/
+__pycache__/
+*.py[cod]
+/.env*
+/persona.md
+/dist/
+/build/
+/*.egg-info/
+/vendor/
