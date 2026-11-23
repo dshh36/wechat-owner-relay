@@ -77,6 +77,9 @@ displayed time are deduplicated locally. Explicit historical sidebar dates
 (yesterday, weekdays, calendar dates) are baselined even when OCR text changes.
 The scan can exclude a visible outgoing text preview when the exact selected
 chat title, high-confidence OCR text and the latest green text bubble agree.
+A clipped preview may end in a single OCR period as well as an ellipsis; this
+requires a matching prefix of at least six characters and the same bubble evidence.
+This does not introduce a contact cooldown or suppress different immediate replies.
 This uses the existing capture, performs no input, and does not save additional
 chat bodies. Other chats, unreadable evidence, different text and new clock
 times remain candidates; there is no contact-wide cooldown that could swallow

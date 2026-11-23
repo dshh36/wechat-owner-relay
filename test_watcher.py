@@ -68,6 +68,26 @@ class WatcherTests(unittest.TestCase):
             incoming = {**item, "preview": "immediate reply", "direction": "unknown"}
             self.assertEqual(fresh_candidates([incoming], state), [incoming])
 
+    def test_outgoing_single_dot_clipping_is_filtered_without_contact_cooldown(self):
+        for scale in (1, 1.5, 2):
+            image, lines, item = self.outgoing_scene(scale)
+            item["preview"] = "outgoing message."
+            watcher.classify_visible_outgoing([item], lines, image, scale)
+            self.assertEqual(item["direction"], "outgoing")
+            state = {"seen": []}
+            self.assertEqual(fresh_candidates([item], state), [])
+            incoming = {**item, "preview": "outgoing message? really?", "direction": "unknown"}
+            self.assertEqual(fresh_candidates([incoming], state), [incoming])
+
+    def test_single_dot_needs_visible_outgoing_evidence_and_long_prefix(self):
+        image, lines, item = self.outgoing_scene(latest_incoming=True)
+        item["preview"] = "outgoing message."
+        watcher.classify_visible_outgoing([item], lines, image, 1)
+        self.assertEqual(item["direction"], "unknown")
+        self.assertEqual(fresh_candidates([item], {"seen": []}), [item])
+        self.assertFalse(watcher.same_clipped_preview("short.", "short.new", allow_expansion=True))
+        self.assertFalse(watcher.same_clipped_preview("outgoing message.", "outgoing message changed"))
+
     def test_other_chat_incoming_last_or_missing_evidence_stays_unverified(self):
         for case in ("other_chat", "incoming_last", "no_bounds", "low_confidence", "other_text", "gray"):
             with self.subTest(case=case):

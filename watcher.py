@@ -317,7 +317,7 @@ def same_clipped_preview(left, right, allow_expansion=False):
         return False
     # A sidebar ellipsis may abbreviate the full outgoing bubble text.
     for clipped, other in ((left, right), (right, left)):
-        match = re.search(r"(?:\.{2,}|…+)$", clipped)
+        match = re.search(r"(?:\.+|…+)$", clipped)
         if match and match.start() >= 6 and other.startswith(clipped[:match.start()]):
             return True
     return False
