@@ -16,6 +16,77 @@ def line(text, x, y, score=0.99):
 
 
 class WatcherTests(unittest.TestCase):
+    def test_old_dates_and_ocr_changes_never_requeue_history(self):
+        state = {"seen": []}
+        for stamp in ("星期六", "周日", "昨天 23:00", "前天", "11月21日", "2026/11/21"):
+            with self.subTest(stamp=stamp):
+                item = {"contact_candidate": "friend", "preview": "old text...",
+                        "displayed_time": stamp}
+                self.assertEqual(fresh_candidates([item], state), [])
+                self.assertEqual(fresh_candidates([{**item, "preview": "o1d text.."}], state), [])
+        new = {**item, "preview": "new arrival", "displayed_time": "16:21"}
+        self.assertEqual(fresh_candidates([new], state), [new])
+
+    def test_whitespace_jitter_but_not_new_text_sharing_prefix_or_time(self):
+        item = {"contact_candidate": "friend", "preview": "long message...",
+                "displayed_time": "16:20"}
+        state = {"seen": []}
+        fresh_candidates([item], state)
+        expanded = {**item, "preview": "long message with more text"}
+        self.assertEqual(fresh_candidates([expanded], state), [expanded])
+        self.assertEqual(fresh_candidates([{**expanded, "preview": "longmessage with more text"}], state), [])
+        changed = {**item, "preview": "different incoming text"}
+        self.assertEqual(fresh_candidates([changed], state), [changed])
+        new = {**item, "displayed_time": "16:21"}
+        self.assertEqual(fresh_candidates([new], state), [new])
+
+    def outgoing_scene(self, scale=1, latest_incoming=False):
+        from PIL import Image, ImageDraw
+        image = Image.new("RGB", (int(900 * scale), int(820 * scale)), (30, 30, 30))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle(tuple(int(v * scale) for v in (480, 485, 820, 525)), fill=(40, 205, 150))
+        title = line("friend", 340 * scale, 54 * scale)
+        first = {**line("outgoing message with", 640 * scale, 495 * scale),
+                 "bounds": [v * scale for v in (500, 488, 780, 503)]}
+        second = {**line("two lines", 600 * scale, 515 * scale),
+                  "bounds": [v * scale for v in (500, 508, 700, 522)]}
+        lines = [title, first, second]
+        if latest_incoming:
+            lines.append({**line("new reply", 420 * scale, 560 * scale),
+                          "bounds": [v * scale for v in (370, 550, 470, 570)]})
+        item = {"contact_candidate": "friend", "preview": "outgoing message...",
+                "displayed_time": "16:20", "direction": "unknown"}
+        return image, lines, item
+
+    def test_outgoing_multiline_bubble_is_filtered_at_each_dpi(self):
+        for scale in (1, 1.5, 2):
+            image, lines, item = self.outgoing_scene(scale)
+            watcher.classify_visible_outgoing([item], lines, image, scale)
+            self.assertEqual(item["direction"], "outgoing")
+            state = {"seen": []}
+            self.assertEqual(fresh_candidates([item], state), [])
+            incoming = {**item, "preview": "immediate reply", "direction": "unknown"}
+            self.assertEqual(fresh_candidates([incoming], state), [incoming])
+
+    def test_other_chat_incoming_last_or_missing_evidence_stays_unverified(self):
+        for case in ("other_chat", "incoming_last", "no_bounds", "low_confidence", "other_text", "gray"):
+            with self.subTest(case=case):
+                image, lines, item = self.outgoing_scene(latest_incoming=case == "incoming_last")
+                if case == "other_chat":
+                    item["contact_candidate"] = "different"
+                elif case == "no_bounds":
+                    lines[-1].pop("bounds")
+                elif case == "low_confidence":
+                    lines[-1]["score"] = 0.7
+                elif case == "other_text":
+                    item["preview"] = "a different new arrival"
+                elif case == "gray":
+                    from PIL import ImageDraw
+                    ImageDraw.Draw(image).rectangle((480, 485, 820, 525), fill=(55, 55, 55))
+                watcher.classify_visible_outgoing([item], lines, image, 1)
+                self.assertEqual(item["direction"], "unknown")
+                self.assertEqual(fresh_candidates([item], {"seen": []}), [item])
+
     def test_read_retries_transient_status_file_lock(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "status.json"
@@ -55,7 +126,8 @@ class WatcherTests(unittest.TestCase):
             self.assertIsNone(watcher.approved_scale(None, state, 2))
         self.assertEqual(state, before)
 
-    def run_adaptive_scan(self, size, scale, identity_changed=False, avatar_changed=False):
+    def run_adaptive_scan(self, size, scale, identity_changed=False, avatar_changed=False,
+                          outgoing=False):
         from PIL import Image
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -69,6 +141,11 @@ class WatcherTests(unittest.TestCase):
             lines = [line("friend", 140 * scale, 100 * scale),
                      line("10:01", 274 * scale, 100 * scale),
                      line("reply", 160 * scale, 122 * scale)]
+            image = Image.new("RGB", size)
+            if outgoing:
+                image, chat_lines, preview = self.outgoing_scene(scale)
+                lines[-1]["text"] = preview["preview"]
+                lines += chat_lines
             from contextlib import ExitStack
             with ExitStack() as stack:
                 for name, path in paths.items():
@@ -77,7 +154,7 @@ class WatcherTests(unittest.TestCase):
                 stack.enter_context(patch.object(watcher, "STOP", root / "STOP"))
                 stack.enter_context(patch.object(sys, "argv", ["watcher", "--scan"]))
                 stack.enter_context(patch.object(watcher, "scan_window", return_value=(
-                    11, Image.new("RGB", size), 21,
+                    11, image, 21,
                     {"exe": "different" if identity_changed else "approved"})))
                 stack.enter_context(patch.object(watcher, "window_scale", return_value=scale))
                 stack.enter_context(patch.object(watcher.time, "sleep"))
@@ -87,6 +164,13 @@ class WatcherTests(unittest.TestCase):
                 watcher.main()
             return (watcher.load(paths["STATUS"], {}), watcher.load(paths["STATE"], {}),
                     watcher.load(paths["QUEUE"], []), ocr.call_count, state)
+
+    def test_scan_does_not_queue_visible_outgoing_after_recovery(self):
+        status, state, queue, calls, original = self.run_adaptive_scan((900, 820), 1, outgoing=True)
+        self.assertEqual(status["status"], "scan_ok")
+        self.assertEqual(status["new_candidates"], 0)
+        self.assertEqual(queue, [])
+        self.assertEqual(calls, 1)
 
     def test_resized_restarted_and_dpi_changed_window_recovers(self):
         for size, scale in (((883, 815), 1), ((1500, 1100), 1.5), ((1766, 1630), 2)):

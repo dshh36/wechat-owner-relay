@@ -16,6 +16,7 @@ import re
 import sys
 import tempfile
 import time
+import unicodedata
 from project_settings import owner_contact
 
 ROOT = Path(__file__).resolve().parent
@@ -247,6 +248,7 @@ def read_ocr(image):
             "text": text, "score": float(score),
             "x": (min(xs) + max(xs)) / 2,
             "y": (min(ys) + max(ys)) / 2,
+            "bounds": [min(xs), min(ys), max(xs), max(ys)],
         })
     return lines
 
@@ -293,6 +295,79 @@ def preview_key(item):
     ))
 
 
+def normalized_preview(text):
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", text))
+
+
+def old_sidebar_time(stamp):
+    stamp = normalized_preview(stamp)
+    return bool(re.fullmatch(
+        r"(?:昨天|前天)(?:\d{1,2}:\d{2})?|(?:星期|周)[一二三四五六日天]"
+        r"|(?:\d{1,4}[/.-]\d{1,2}(?:[/.-]\d{1,2})?|\d{1,4}年\d{1,2}月\d{1,2}日"
+        r"|\d{1,2}月\d{1,2}日)(?:\d{1,2}:\d{2})?",
+        stamp,
+    ))
+
+
+def same_clipped_preview(left, right, allow_expansion=False):
+    left, right = normalized_preview(left), normalized_preview(right)
+    if re.sub(r"(?:\.{2,}|…+)$", "", left) == re.sub(r"(?:\.{2,}|…+)$", "", right):
+        return True
+    if not allow_expansion:
+        return False
+    # A sidebar ellipsis may abbreviate the full outgoing bubble text.
+    for clipped, other in ((left, right), (right, left)):
+        match = re.search(r"(?:\.{2,}|…+)$", clipped)
+        if match and match.start() >= 6 and other.startswith(clipped[:match.start()]):
+            return True
+    return False
+
+
+def green_text_background(image, line):
+    bounds = line.get("bounds")
+    if not bounds:
+        return False
+    left, top, right, bottom = bounds
+    patch = image.crop((max(0, int(left) - 2), max(0, int(top) - 2),
+                        min(image.width, int(right) + 2), min(image.height, int(bottom) + 2))).convert("RGB")
+    if not patch.width or not patch.height:
+        return False
+    rgb = patch.tobytes()
+    pixels = zip(rgb[0::3], rgb[1::3], rgb[2::3])
+    green = sum(25 <= r <= 130 and 145 <= g <= 235 and 75 <= b <= 190
+                and g - r >= 65 and g - b >= 20 for r, g, b in pixels)
+    return green / (patch.width * patch.height) >= 0.40
+
+
+def classify_visible_outgoing(previews, lines, image, scale):
+    """Use only the selected chat's latest visible green text bubble as evidence."""
+    titles = [line["text"] for line in lines
+              if 302 <= line["x"] / scale < image.width / scale - 140
+              and 40 <= line["y"] / scale <= 70 and line["score"] >= 0.90]
+    if len(titles) != 1:
+        return
+    matches = [item for item in previews if item["contact_candidate"] == titles[0]]
+    if len(matches) != 1:
+        return
+    history = sorted((line for line in lines
+                      if 360 <= line["x"] / scale < image.width / scale - 65
+                      and 85 <= line["y"] / scale < image.height / scale - 145),
+                     key=lambda line: (line["y"], line["x"]))
+    if not history or not green_text_background(image, history[-1]):
+        return
+    bubble = []
+    bottom = history[-1]["y"]
+    for line in reversed(history):
+        if (bottom - line["y"] > 30 * scale or line["score"] < 0.90
+                or not green_text_background(image, line)):
+            break
+        bubble.append(line["text"])
+        bottom = line["y"]
+    text = "".join(reversed(bubble))
+    if same_clipped_preview(matches[0]["preview"], text, allow_expansion=True):
+        matches[0]["direction"] = "outgoing"
+
+
 def fresh_candidates(previews, state):
     # Previously visible history and identical repeats are never queued again.
     seen = set(state["seen"])
@@ -301,8 +376,8 @@ def fresh_candidates(previews, state):
     for item in previews:
         contact = item["contact_candidate"]
         old = previous.get(contact)
-        stamp = re.sub(r"\s+", "", item["displayed_time"])
-        old_stamp = re.sub(r"\s+", "", old["displayed_time"]) if old else ""
+        stamp = normalized_preview(item["displayed_time"])
+        old_stamp = normalized_preview(old["displayed_time"]) if old else ""
         # Midnight relabels the same sidebar entry without receiving a message.
         aged = (
             old is not None
@@ -313,15 +388,12 @@ def fresh_candidates(previews, state):
         # OCR sometimes varies only the number of dots in a clipped preview.
         ellipsis_jitter = (
             old is not None and stamp == old_stamp
-            and old["preview"] != item["preview"]
-            and re.search(r"(?:\.{2,}|…+)$", old["preview"]) is not None
-            and re.search(r"(?:\.{2,}|…+)$", item["preview"]) is not None
-            and re.sub(r"(?:\.{2,}|…+)$", "", old["preview"])
-            == re.sub(r"(?:\.{2,}|…+)$", "", item["preview"])
+            and same_clipped_preview(old["preview"], item["preview"])
         )
         key = preview_key(item)
         if key not in seen:
-            if not aged and not ellipsis_jitter:
+            if (not aged and not ellipsis_jitter and not old_sidebar_time(stamp)
+                    and item.get("direction") != "outgoing"):
                 fresh.append(item)
             state["seen"].append(key)
             seen.add(key)
@@ -487,6 +559,7 @@ def main():
             return
     lines = read_ocr(image)
     previews = parse_previews(lines, *image.size, scale)
+    classify_visible_outgoing(previews, lines, image, scale)
     if not previews:
         report("paused", reason="No reliable sidebar previews; OCR/calibration not verified")
         return

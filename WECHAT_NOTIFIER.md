@@ -72,9 +72,18 @@ Each verification reads only its selected queue entries through `watcher.py
 --events ID...`. The compact prompt permits reuse of complete skill instructions
 already in current context, keeps visual verification mandatory, and limits its
 report to the submitted candidates so later arrivals are not reported twice.
-Unchanged clipped previews whose trailing ellipsis length varies at the same
-displayed time are deduplicated locally. New text or a new time remains a
-candidate. Submission, reply observation and API acceptance timestamps support
+Unchanged previews whose whitespace or trailing ellipsis varies at the same
+displayed time are deduplicated locally. Explicit historical sidebar dates
+(yesterday, weekdays, calendar dates) are baselined even when OCR text changes.
+The scan can exclude a visible outgoing text preview when the exact selected
+chat title, high-confidence OCR text and the latest green text bubble agree.
+This uses the existing capture, performs no input, and does not save additional
+chat bodies. Other chats, unreadable evidence, different text and new clock
+times remain candidates; there is no contact-wide cooldown that could swallow
+an immediate reply. New text sharing a clipped prefix also remains a candidate
+when its direction is unverified. This is conservative filtering, not reliable
+direction detection for offscreen messages, images or custom themes.
+Submission, reply observation and API acceptance timestamps support
 later latency checks without storing message bodies or credentials.
 
 This is a visible-sidebar detector, not a complete inbox subscription. It can
