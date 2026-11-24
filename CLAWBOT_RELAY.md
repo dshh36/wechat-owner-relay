@@ -105,6 +105,30 @@ To discard one confirmed `awaiting_reply` event, pass its event key to
 protected `--relay-on` path. The command refuses while the relay is running,
 when bindings differ, or when more than one event is unresolved.
 
+## Continuous Conversation Coverage
+
+Sidebar previews are triggers, not a complete inbox. Verification now reads the
+same contact's continuous visible segment from the last verified anchor (at most
+50 messages), including intermediate text without its own preview candidate.
+Candidate batches stay within one contact and run oldest first; the scan interval
+is unchanged. Missing context must be reported rather than guessed.
+
+`conversation_context.py --event HASH --contact NAME` reads locally retained
+unanswered text for that exact candidate contact and current owner binding.
+After Computer Use verifies the actual chat, `--incoming-file FILE` accepts a
+JSON array of `{ "anchor": "visible date/time plus stable position", "text": "..." }`.
+It does not read WeChat, execute the text, or send messages. Reusing the same
+anchor/text deduplicates it; identical text at distinct positions stays separate.
+Only explicitly supplied `--answered HASH ...` entries are resolved after a
+corresponding reply completes. Presenting a draft or replying to a sticker does
+not clear unanswered text. Do not record OCR previews as verified context.
+
+The private `wechat_conversation_context.json` stays in the runtime directory
+and is excluded by the repository's root JSON ignore rule. Context is bounded
+to 500 entries per contact; reaching the limit requires local review rather
+than silently dropping unanswered messages. These instructions improve coverage
+but cannot recover unseen messages or guarantee semantic completeness.
+
 ## Files
 
 - `clawbot_relay_status.json`: status and sanitized failure reason.
