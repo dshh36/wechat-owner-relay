@@ -32,7 +32,7 @@ LOCK = ROOT / "clawbot_relay.lock"
 APP_STATE = Path.home() / ".codex-session-delete"
 SETTINGS = APP_STATE / "settings.json"
 CHANNEL = "codex-plus-weixin/1.0"
-TERMINAL_EVENT_STAGES = {"delivered", "discarded", "interrupted"}
+TERMINAL_EVENT_STAGES = {"delivered", "discarded", "interrupted", "send_uncertain"}
 DESKTOP_POLL_INTERVAL = 0.5
 REPLY_POLL_INTERVAL = 0.5
 
@@ -266,6 +266,24 @@ def record_status(status, **fields):
                   "automatic_pc_wechat_sending": False, **fields})
 
 
+def quarantine_pending_sends(config, state, identity):
+    """Retain crashed send attempts without replaying or blocking new input."""
+    pending = [event for event in state.get("events", {}).values()
+               if event.get("stage") == "before_send"]
+    if not pending:
+        return 0
+    settings, _, _, _, current = binding(config)
+    if (not config.get("enabled") or settings.get("weixinConnectEnabled")
+            or current != identity or state.get("binding_fingerprint") != identity):
+        raise RelayError("Cannot isolate a changed or disabled binding")
+    for event in pending:
+        event.update(stage="send_uncertain", isolated_at=now(),
+                     failure_type="ProcessInterrupted")
+    if pending:
+        save(STATE, state)
+    return len(pending)
+
+
 def relay_message(config, client, state, message, text, peer, identity):
     event_id, native_key = message_key(message)
     events = state.setdefault("events", {})
@@ -321,7 +339,20 @@ def relay_message(config, client, state, message, text, peer, identity):
         events[event_id].update(stage="before_send", turn_id=turn_id, chunk=index)
         save(STATE, state)
 
-    client.send(peer, text, message["context_token"], before_chunk=before_chunk)
+    try:
+        client.send(peer, text, message["context_token"], before_chunk=before_chunk)
+    except (RelayError, OSError, TimeoutError) as error:
+        # A send may already have reached the service. Never retry any chunk;
+        # isolate this event while still enforcing stop and binding checks.
+        require_receiver_stopped(identity)
+        if events[event_id].get("stage") != "before_send":
+            raise
+        events[event_id].update(stage="send_uncertain", isolated_at=now(),
+                                failure_type=type(error).__name__)
+        save(STATE, state)
+        record_status("listening", has_pending_message=False,
+                      last_result="send_uncertain")
+        return
     events[event_id].update(stage="delivered", at=now())
     state["native_processed_keys"] = state.get("native_processed_keys", [native_key])[-512:]
     save(STATE, state)
@@ -410,6 +441,7 @@ def run(wait_for_builtin=False):
             state = load(STATE, {})
             if state and state.get("binding_fingerprint") != identity:
                 raise RelayError("Stored relay belongs to a different account or peer")
+            quarantine_pending_sends(config, state, identity)
             recover_interrupted_replies(config, state, identity, allow_resume=True)
             if any(event.get("stage") not in TERMINAL_EVENT_STAGES | {"awaiting_reply"}
                    for event in state.get("events", {}).values()):

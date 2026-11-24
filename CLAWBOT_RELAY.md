@@ -30,24 +30,32 @@ start another Codex CLI process, reset the conversation, or change permissions.
 - A verified `awaiting_reply` event with exactly one matching running/completed
   turn and no send attempt may resume when the original inbound update is
   replayed from the preserved cursor. It reuses the original marker and reply
-  context without submitting the prompt again. Uncertain submissions and sends
-  remain blocked.
+  context without submitting the prompt again. Uncertain submissions remain
+  blocked; uncertain sends are isolated as described below.
 - Wait for the desktop conversation to become idle; never intentionally steer
   an active turn.
 - Find the reply by the unique marker in the submitted user message and a new
   turn ID. Return only that turn's completed `final_answer`.
 - No model calls while waiting for messages. Tencent's getupdates request is a
   network long poll, not a model request.
-- A failed or uncertain model submission or reply send pauses the relay.
-  Inspect its status before recovery; do not automatically retry.
+- A failed or uncertain model submission still pauses the relay. A reply-send
+  transport failure is recorded as `send_uncertain`, retaining its chunk index,
+  turn ID, timestamp and sanitized exception type. It is never retried, but the
+  relay continues with subsequent inbound messages and advances the receive
+  cursor normally. A partially delivered reply can remain incomplete.
+- On startup, an old `before_send` record is also isolated as `send_uncertain`
+  after verifying the enabled account/peer binding and disabled native receiver.
+  This does not claim delivery succeeded or send any old content. Binding
+  changes, explicit stops, ledger failures and uncertain model submissions
+  still stop the relay.
 - A uniquely correlated interrupted turn with no final answer and no send
   attempt is recorded as `interrupted`. The relay can then accept new messages
   without replaying that request or sending its partial output. The normal
   start switch also applies this guarded recovery to older paused records.
 - A single `awaiting_reply` event may be marked `discarded` only after the
   owner explicitly chooses to abandon it. This preserves its ledger entry and
-  receive cursor. Events at `before_post` or `before_send` remain blocked
-  because delivery may be uncertain.
+  receive cursor. Events at `before_post` remain blocked because submission may
+  be uncertain; `before_send` records use the isolation rule above.
 - The owner-authorized "Reconnect" action (`monitor_control.py --reconnect`)
   abandons all old `before_post`, `awaiting_reply`, and `before_send` events
   after the previous relay process exits. It records their original stage and

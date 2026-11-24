@@ -151,6 +151,7 @@ def validate_relay_start(discard_pending=False):
         if pending:
             save(relay.STATE, state)
     try:
+        relay.quarantine_pending_sends(config, state, identity)
         relay.recover_interrupted_replies(config, state, identity, allow_resume=True)
     except relay.RelayError as error:
         raise ControlError("未完成消息无法安全恢复，需要先核查") from error

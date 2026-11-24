@@ -206,14 +206,130 @@ class RelayTests(unittest.TestCase):
                 raise TimeoutError()
             client.send.side_effect = uncertain
             state = {"events": {}}
-            with self.assertRaises(TimeoutError):
-                relay.relay_message({"thread_id": "thread"}, client, state,
-                                    message(), "hello", "owner", "bound")
-            client.send.assert_called_once()
-            self.assertEqual(next(iter(state["events"].values()))["stage"], "before_send")
             relay.relay_message({"thread_id": "thread"}, client, state,
                                 message(), "hello", "owner", "bound")
             client.send.assert_called_once()
+            event = next(iter(state["events"].values()))
+            self.assertEqual(event["stage"], "send_uncertain")
+            self.assertEqual(event["failure_type"], "TimeoutError")
+            relay.relay_message({"thread_id": "thread"}, client, state,
+                                message(), "hello", "owner", "bound")
+            client.send.assert_called_once()
+
+    def test_uncertain_send_does_not_block_next_message_or_retry_replay(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(relay, "STATE", Path(directory) / "state.json"), \
+                patch.object(relay, "CONFIG", Path(directory) / "config.json"), \
+                patch.object(relay, "STOP", Path(directory) / "stop"), \
+                patch.object(relay, "LOCK", Path(directory) / "lock"), \
+                patch.object(relay, "binding", return_value=(
+                    {}, {"getUpdatesBuf": "keep"}, "account", "owner", "bound")), \
+                patch.object(relay, "require_receiver_stopped"), \
+                patch.object(relay, "ClawBotClient") as client_cls, \
+                patch.object(relay, "record_status") as record, \
+                patch.object(relay, "correlated_reply", return_value=("turn", "reply")), \
+                patch.object(relay, "desktop_request", side_effect=[
+                    {"threadId": "thread", "live": True, "runtime": "idle", "turns": []},
+                    {"kind": "start"}, {"threadId": "thread", "live": True},
+                ] * 2):
+            relay.save(relay.CONFIG, {"enabled": True, "thread_id": "thread"})
+            relay.save(relay.STATE, {"binding_fingerprint": "bound", "cursor": "keep",
+                                    "activated_ms": 1000, "events": {}})
+            client = client_cls.return_value
+            def updates(cursor):
+                if cursor == "keep":
+                    return {"get_updates_buf": "next", "msgs": [
+                        message(), message(), message(message_id=2)]}
+                relay.STOP.touch()
+                return {"msgs": []}
+            def send(*args, **kwargs):
+                kwargs["before_chunk"](0)
+                if client.send.call_count == 1:
+                    raise relay.RelayError("private response details")
+            client.updates.side_effect = updates
+            client.send.side_effect = send
+            relay.run()
+            state = relay.load(relay.STATE, {})
+            self.assertEqual(client.send.call_count, 2)
+            self.assertEqual(state["cursor"], "next")
+            self.assertEqual([event["stage"] for event in state["events"].values()],
+                             ["send_uncertain", "delivered"])
+            self.assertNotIn("private response details", json.dumps(state))
+            self.assertFalse(any(call.args[0] == "paused" for call in record.call_args_list))
+
+    def test_partial_send_is_not_retried_and_binding_changes_still_stop(self):
+        for changed in (False, True):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as directory, \
+                    patch.object(relay, "STATE", Path(directory) / "state.json"), \
+                    patch.object(relay, "require_receiver_stopped",
+                                 side_effect=[None, None, None,
+                                              relay.RelayError("binding changed")
+                                              if changed else None]), \
+                    patch.object(relay, "record_status"), \
+                    patch.object(relay, "correlated_reply", return_value=("turn", "reply")), \
+                    patch.object(relay, "desktop_request", return_value={
+                        "threadId": "thread", "live": True}):
+                key, _ = relay.message_key(message())
+                state = {"events": {key: {"stage": "awaiting_reply", "marker": "[marker]"}}}
+                client = Mock()
+                def partial_send(*args, **kwargs):
+                    kwargs["before_chunk"](0)
+                    kwargs["before_chunk"](1)
+                    raise TimeoutError()
+                client.send.side_effect = partial_send
+                if changed:
+                    with self.assertRaisesRegex(relay.RelayError, "binding changed"):
+                        relay.relay_message({"thread_id": "thread"}, client, state,
+                                            message(), "hi", "owner", "bound")
+                    self.assertEqual(state["events"][key]["stage"], "before_send")
+                else:
+                    relay.relay_message({"thread_id": "thread"}, client, state,
+                                        message(), "hi", "owner", "bound")
+                    self.assertEqual(state["events"][key]["stage"], "send_uncertain")
+                    relay.relay_message({"thread_id": "thread"}, client, state,
+                                        message(), "hi", "owner", "bound")
+                self.assertEqual(state["events"][key]["chunk"], 1)
+                client.send.assert_called_once()
+
+    def test_crashed_sends_are_isolated_without_touching_other_pending_work(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(relay, "STATE", Path(directory) / "state.json"), \
+                patch.object(relay, "binding", return_value=(
+                    {}, {}, "account", "peer", "bound")), \
+                patch.object(relay, "desktop_request") as request, \
+                patch.object(relay, "ClawBotClient") as client:
+            state = {"binding_fingerprint": "bound", "cursor": "keep",
+                     "native_processed_keys": ["keep"], "events": {
+                         "send": {"stage": "before_send", "chunk": 1, "turn_id": "old"},
+                         "post": {"stage": "before_post"},
+                         "reply": {"stage": "awaiting_reply"},
+                     }}
+            self.assertEqual(relay.quarantine_pending_sends({"enabled": True}, state, "bound"), 1)
+            self.assertEqual(state["events"]["send"]["stage"], "send_uncertain")
+            self.assertEqual(state["events"]["send"]["chunk"], 1)
+            self.assertEqual(state["events"]["post"], {"stage": "before_post"})
+            self.assertEqual(state["events"]["reply"], {"stage": "awaiting_reply"})
+            self.assertEqual(state["cursor"], "keep")
+            self.assertEqual(state["native_processed_keys"], ["keep"])
+            self.assertEqual(relay.quarantine_pending_sends({"enabled": True}, state, "bound"), 0)
+            request.assert_not_called()
+            client.assert_not_called()
+
+    def test_isolation_cannot_bypass_changed_or_disabled_binding(self):
+        for enabled, builtin, identity in ((True, False, "other"),
+                                          (False, False, "bound"),
+                                          (True, True, "bound")):
+            with self.subTest(enabled=enabled, builtin=builtin, identity=identity), \
+                    patch.object(relay, "binding", return_value=(
+                        {"weixinConnectEnabled": builtin}, {}, "account", "peer", identity)), \
+                    patch.object(relay, "save") as save:
+                state = {"binding_fingerprint": "bound", "events": {
+                    "old": {"stage": "before_send"}}}
+                before = json.dumps(state)
+                with self.assertRaises(relay.RelayError):
+                    relay.quarantine_pending_sends({"enabled": enabled}, state, "bound")
+                self.assertEqual(json.dumps(state), before)
+                save.assert_not_called()
 
     def test_headless_fallback_never_sends_reply(self):
         with tempfile.TemporaryDirectory() as directory, \

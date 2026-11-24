@@ -287,13 +287,16 @@ class RelayControlTests(unittest.TestCase):
                     control.validate_relay_start(discard_pending=True)
             self.assertEqual(control.relay.STATE.read_bytes(), before)
 
-    def test_normal_start_still_refuses_uncertain_send(self):
+    def test_normal_start_isolates_uncertain_send_without_replaying(self):
         control.relay.STATE.write_text(json.dumps({
             "binding_fingerprint": "identity",
             "events": {"pending": {"stage": "before_send"}},
         }), encoding="utf-8")
-        with self.assertRaises(control.ControlError):
-            control.validate_relay_start()
+        control.relay.STOP.touch()
+        control.validate_relay_start()
+        state = json.loads(control.relay.STATE.read_text(encoding="utf-8"))
+        self.assertEqual(state["events"]["pending"]["stage"], "send_uncertain")
+        control.relay.ClawBotClient.return_value.send.assert_not_called()
 
     def test_native_receiver_prevents_start(self):
         with patch.object(control.relay, "binding", return_value=(
