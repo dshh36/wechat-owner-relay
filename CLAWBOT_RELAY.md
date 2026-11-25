@@ -34,6 +34,11 @@ start another Codex CLI process, reset the conversation, or change permissions.
   blocked; uncertain sends are isolated as described below.
 - Wait for the desktop conversation to become idle; never intentionally steer
   an active turn.
+- Each relay prompt explicitly prioritizes its exact current `text` over older
+  thread topics, treats prior answers as context rather than templates, and asks
+  the assistant to answer a correction directly instead of repeating an earlier
+  apology. This reduces stale-context replies but does not guarantee semantic
+  accuracy; review real exchanges after updating.
 - Find the reply by the unique marker in the submitted user message and a new
   turn ID. Return only that turn's completed `final_answer`.
 - No model calls while waiting for messages. Tencent's getupdates request is a

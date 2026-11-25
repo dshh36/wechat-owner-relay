@@ -29,6 +29,14 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(len(digest), 64)
         self.assertNotIn("owner", digest)
 
+    def test_prompt_keeps_current_message_ahead_of_old_apology_context(self):
+        prompt = relay.make_prompt("不用说对不起了", "[marker]")
+        self.assertIn('"text": "不用说对不起了"', prompt)
+        self.assertIn("本条 JSON.text 作为唯一当前请求", prompt)
+        self.assertIn("不要把上一轮助手的回答当作模板", prompt)
+        self.assertIn("纠正你、指出答非所问或要求停止道歉", prompt)
+        self.assertIn("本条 text", prompt)
+
     def test_no_unapproved_or_insecure_endpoint(self):
         for endpoint in ("http://ilinkai.weixin.qq.com", "https://evil.example",
                          "https://ilinkai.weixin.qq.com@evil.example",
