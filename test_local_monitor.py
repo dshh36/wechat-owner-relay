@@ -1,4 +1,3 @@
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,14 +15,12 @@ class LocalMonitorTests(unittest.TestCase):
                 self.assertTrue(local_monitor.wait_for_stop(20))
 
     def test_scan_timeout_pauses_monitor(self):
-        with patch.object(local_monitor.subprocess, "run",
-                          side_effect=subprocess.TimeoutExpired("scanner", 45)):
+        with patch.object(local_monitor._scanner, "scan", return_value={
+                "status": "paused", "reason": "Local scan timed out"}):
             self.assertEqual(local_monitor.scan_once()["status"], "paused")
 
     def test_scanner_identity_failure_is_not_retried_as_success(self):
-        with patch.object(local_monitor.subprocess, "run",
-                          return_value=subprocess.CompletedProcess([], 0)), \
-             patch.object(local_monitor, "load",
+        with patch.object(local_monitor._scanner, "scan",
                           return_value={"status": "paused", "reason": "Account changed"}):
             status = local_monitor.scan_once()
             self.assertEqual(status["status"], "paused")

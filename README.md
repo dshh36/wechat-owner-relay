@@ -83,6 +83,7 @@ python monitor_control.py --resume-notifications
 | --- | --- |
 | `watcher.py` | 窗口绑定、OCR、候选去重与回复账本 |
 | `local_monitor.py` | 扫描和核对结果的独立时钟 |
+| `scan_worker.py` | 复用 OCR 模型的独立扫描进程与超时回收 |
 | `wechat_notifier.py` | 桌面核对请求与手机提醒 |
 | `clawbot_relay.py` | 唯一本人连接的文字双向接力 |
 | `relay_desktop.py` | 已绑定桌面会话的 MCP 传输 |
@@ -102,6 +103,8 @@ python monitor_control.py --resume-notifications
 可选文字后端默认读取本项目本地 `persona.md`，也可通过 `WECHAT_PERSONA_PATH` 指定经过批准的资料文件。该资料会随文字请求发送给已配置模型服务；不要指向整个私人笔记库。详见 [文字后端](TEXT_BACKEND.md)。
 
 ## 已知限制与验证
+
+检测仍使用 5 秒间隔。独立扫描进程复用 OCR 模型，ONNX 与底层数学库限制为单线程，并在 Windows 下使用低于正常的进程优先级。每 500 次扫描回收一次工作进程；扫描超时或关闭检测时终止工作进程。模型驻留会持续占用部分内存，实际开销取决于窗口内容和尺寸。`local_monitor.json` 中的 `scan_metrics` 记录最近一次扫描的耗时、CPU 时间和进程编号，便于本地排查；它不是系统 CPU 峰值历史记录。
 
 侧栏以外的聊天、相同预览的重复消息、连续快速来信、截断文本及窗口布局变化可能漏检或误报。核对任务运行时扫描暂缓以避免队列写入冲突。桌面空闲判断与提交不是原子操作，冲突或不确定投递会暂停。
 

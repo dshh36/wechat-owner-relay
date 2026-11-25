@@ -233,14 +233,21 @@ def approved_layout(image, state, current_scale):
     return (shifted(*best[2]), best[1], best[2]) if best else (image, None, origin)
 
 
+_OCR_ENGINE = None
+
+
 def read_ocr(image):
+    global _OCR_ENGINE
     import numpy as np
     from rapidocr_onnxruntime import RapidOCR
 
-    engine = RapidOCR(
-        intra_op_num_threads=2, inter_op_num_threads=1,
-    )
-    result, _ = engine(np.asarray(image))
+    if _OCR_ENGINE is None:
+        import cv2
+        cv2.setNumThreads(1)
+        _OCR_ENGINE = RapidOCR(
+            intra_op_num_threads=1, inter_op_num_threads=1,
+        )
+    result, _ = _OCR_ENGINE(np.asarray(image))
     lines = []
     for box, text, score in result or []:
         xs, ys = zip(*box)
@@ -475,7 +482,7 @@ def reply_transition(event_id, sent=False):
     return {"state": event["state"]}
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--initialize", action="store_true")
     parser.add_argument("--recalibrate", action="store_true")
@@ -492,7 +499,7 @@ def main():
     reply = parser.add_mutually_exclusive_group()
     reply.add_argument("--begin-reply", metavar="EVENT_ID")
     reply.add_argument("--reply-sent", metavar="EVENT_ID")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.begin_reply or args.reply_sent:
         print(json.dumps(reply_transition(
             args.begin_reply or args.reply_sent, sent=bool(args.reply_sent))))

@@ -3,17 +3,17 @@ from __future__ import annotations
 
 import argparse
 import os
-import subprocess
-import sys
 import time
+from scan_worker import ScanWorker
 
-from watcher import ROOT, STATUS, STOP, WINDOW_RECOVERY_AMBIGUOUS, WINDOW_UNAVAILABLE, load, now, save
+from watcher import ROOT, STOP, WINDOW_RECOVERY_AMBIGUOUS, WINDOW_UNAVAILABLE, load, now, save
 from event_bridge import CONFIG, maybe_dispatch
 from desktop_bridge import CONFIG as DESKTOP_CONFIG, maybe_dispatch as desktop_dispatch
 from wechat_notifier import CONFIG as NOTIFIER_CONFIG, tick as notifier_tick, in_flight
 
 MONITOR_STATUS = ROOT / "local_monitor.json"
 LOCK = ROOT / "local_monitor.lock"
+_scanner = ScanWorker()
 RECOVERABLE_SCAN_REASONS = {
     "Window session or size changed; recalibration required",
     f"RuntimeError: {WINDOW_UNAVAILABLE}",
@@ -37,23 +37,7 @@ def wait_for_stop(seconds):
 
 
 def scan_once():
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
-    try:
-        result = subprocess.run(
-            [sys.executable, str(ROOT / "watcher.py"), "--scan"],
-            cwd=ROOT, env=env, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, timeout=45,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-    except subprocess.TimeoutExpired:
-        return {"status": "paused", "reason": "Local scan timed out"}
-    status = load(STATUS, {})
-    if result.returncode != 0 or status.get("status") != "scan_ok":
-        return {
-            "status": "paused",
-            "reason": status.get("reason", "Local scan did not complete normally"),
-        }
-    return status
+    return _scanner.scan(should_stop=STOP.exists)
 
 
 def monitor_loop(interval, cycles, state, record, poll_interval=1):
@@ -62,6 +46,8 @@ def monitor_loop(interval, cycles, state, record, poll_interval=1):
         # Scan and result polling use separate clocks. Queue writes stay serial.
         if not in_flight() and time.monotonic() >= next_scan:
             status = scan_once()
+            if status["status"] == "stopped":
+                break
             if status["status"] != "scan_ok":
                 reason = status.get("reason", "Scan unavailable")
                 if reason in RECOVERABLE_SCAN_REASONS:
@@ -78,6 +64,7 @@ def monitor_loop(interval, cycles, state, record, poll_interval=1):
                 "running", reason=None, last_scan_at=status["checked_at"],
                 pending=status.get("pending", 0),
                 new_candidates=status.get("new_candidates", 0),
+                scan_metrics=status.get("scan_metrics", {}),
             )
             bridge = maybe_dispatch()
             desktop = desktop_dispatch()
@@ -127,6 +114,7 @@ def run(interval, cycles, poll_interval=1):
             record("paused", reason=f"{type(error).__name__}: {error}")
             raise
         finally:
+            _scanner.close()
             lock.seek(0)
             msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
 
