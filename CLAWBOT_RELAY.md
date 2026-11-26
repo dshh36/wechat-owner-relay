@@ -7,10 +7,18 @@ start another Codex CLI process, reset the conversation, or change permissions.
 ## Scope
 
 - Bind only the one existing ClawBot peer whose native thread mapping exactly
-  matches `clawbot_relay_config.json`.
+  matches `binding_thread_id` (falling back to `thread_id` for legacy config).
+  `thread_id` is the local Codex conversation that receives the prompt and
+  supplies the correlated answer; it may be a separate dedicated conversation.
 - Accept newly received plain text after first activation. Attachments, slash
   commands, other peers and historical messages are ignored.
 - Keep the target conversation open in desktop Codex and keep Codex++ running.
+- Bind the relay to a dedicated Codex conversation, not a personal conversation
+  used for unrelated chats. This starts the relay with a clean conversational
+  context and reduces unrelated-history interference; it does not guarantee
+  perfect replies or prevent context drift as future relay messages accumulate.
+  The target thread ID belongs only in the private runtime configuration and
+  must not be committed or shared.
 - The desktop upgrade from 26.1111.2228.0 to 26.1117.3838.0 removed the old
   Follower connection used by Codex++ 2.8.0. Historical desktop logs show the
   old IPC router running before restart; the current desktop has no such

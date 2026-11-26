@@ -17,7 +17,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from desktop_bridge import NoRedirect
 from relay_desktop import request as desktop_request
@@ -60,8 +60,13 @@ def binding(config):
     settings = load(SETTINGS, {})
     account = settings.get("weixinConnectAccountId", "").strip()
     native = load(native_state_path(account), {})
+    binding_thread_id = config.get("binding_thread_id", config.get("thread_id"))
+    try:
+        UUID(binding_thread_id)
+    except (TypeError, ValueError, AttributeError):
+        raise RelayError("Invalid native thread binding") from None
     matches = [peer for peer, thread in native.get("threadIds", {}).items()
-               if thread == config["thread_id"]]
+               if thread == binding_thread_id]
     if len(matches) != 1:
         raise RelayError("Exactly one existing peer must match the approved thread")
     peer = matches[0]

@@ -8,12 +8,18 @@ from uuid import UUID
 ROOT = Path(__file__).resolve().parent
 
 
-def initialize(root, thread_id, owner_contact="owner", account_label="my-secondary-account"):
+def initialize(root, thread_id, owner_contact="owner", account_label="my-secondary-account",
+               relay_thread_id=None):
     UUID(thread_id)
+    relay_thread_id = relay_thread_id or thread_id
+    UUID(relay_thread_id)
     if not owner_contact.strip() or not account_label.strip():
         raise ValueError("Account label and owner contact must be nonempty")
     configs = {
-        "clawbot_relay_config.json": {"enabled": False, "thread_id": thread_id},
+        "clawbot_relay_config.json": {
+            "enabled": False, "thread_id": relay_thread_id,
+            "binding_thread_id": thread_id,
+        },
         "wechat_notifier_config.json": {
             "enabled": False, "thread_id": thread_id, "owner_contact": owner_contact,
             "carry_replies": False, "idle_seconds": 2, "wait_seconds": 1200,
@@ -36,12 +42,14 @@ def initialize(root, thread_id, owner_contact="owner", account_label="my-seconda
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--thread-id", required=True, help="Existing bound local Codex chat UUID")
+    parser.add_argument("--relay-thread-id", help="Optional dedicated local Codex chat UUID for replies")
     parser.add_argument("--owner-contact", default="owner", help="Exact verified owner nickname")
     parser.add_argument("--account-label", default="my-secondary-account")
     args = parser.parse_args()
     if sys.platform != "win32":
         parser.error("Live detection and relay require Windows")
-    created = initialize(ROOT, args.thread_id, args.owner_contact, args.account_label)
+    created = initialize(ROOT, args.thread_id, args.owner_contact, args.account_label,
+                         args.relay_thread_id)
     print(f"Created {len(created)} disabled configurations. No services started.")
 
 

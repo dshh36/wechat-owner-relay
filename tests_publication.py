@@ -20,6 +20,19 @@ class PublicationTests(unittest.TestCase):
                 initialize(root, "00000000-0000-0000-0000-000000000001")
             self.assertEqual(before, {p.name: p.read_bytes() for p in root.iterdir()})
 
+    def test_setup_can_separate_native_binding_from_relay_reply_thread(self):
+        import json
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            initialize(root, "00000000-0000-0000-0000-000000000001",
+                       relay_thread_id="00000000-0000-0000-0000-000000000002")
+            config = json.loads((root / "clawbot_relay_config.json").read_text())
+            self.assertEqual(config["binding_thread_id"],
+                             "00000000-0000-0000-0000-000000000001")
+            self.assertEqual(config["thread_id"],
+                             "00000000-0000-0000-0000-000000000002")
+            self.assertFalse(config["enabled"])
+
     def test_owner_contact_is_configurable_without_personal_default(self):
         self.assertEqual(owner_contact({}), "owner")
         self.assertEqual(owner_contact({"owner_contact": "example"}), "example")

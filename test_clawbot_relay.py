@@ -29,6 +29,26 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(len(digest), 64)
         self.assertNotIn("owner", digest)
 
+    def test_binding_keeps_native_owner_when_reply_thread_is_dedicated(self):
+        settings = {"weixinConnectAccountId": "account", "weixinConnectAllowFrom": "owner"}
+        native = {"threadIds": {"owner": "11111111-1111-4111-8111-111111111111"}}
+        with patch.object(relay, "load", side_effect=[settings, native]), patch.object(
+                relay, "native_state_path", return_value=Path("native-state")):
+            result = relay.binding({
+                "thread_id": "22222222-2222-4222-8222-222222222222",
+                "binding_thread_id": "11111111-1111-4111-8111-111111111111",
+            })
+        self.assertEqual(result[2:4], ("account", "owner"))
+        self.assertEqual(result[4], relay.hashlib.sha256(b"account" + bytes([0]) + b"owner").hexdigest())
+
+    def test_legacy_binding_uses_the_reply_thread_when_no_source_is_configured(self):
+        settings = {"weixinConnectAccountId": "account"}
+        native = {"threadIds": {"owner": "11111111-1111-4111-8111-111111111111"}}
+        with patch.object(relay, "load", side_effect=[settings, native]), patch.object(
+                relay, "native_state_path", return_value=Path("native-state")):
+            result = relay.binding({"thread_id": "11111111-1111-4111-8111-111111111111"})
+        self.assertEqual(result[2:4], ("account", "owner"))
+
     def test_prompt_keeps_current_message_ahead_of_old_apology_context(self):
         prompt = relay.make_prompt("不用说对不起了", "[marker]")
         self.assertIn('"text": "不用说对不起了"', prompt)
