@@ -26,12 +26,16 @@ class PublicationTests(unittest.TestCase):
             root = Path(folder)
             initialize(root, "00000000-0000-0000-0000-000000000001",
                        relay_thread_id="00000000-0000-0000-0000-000000000002")
-            config = json.loads((root / "clawbot_relay_config.json").read_text())
-            self.assertEqual(config["binding_thread_id"],
+            relay = json.loads((root / "clawbot_relay_config.json").read_text())
+            notifier = json.loads((root / "wechat_notifier_config.json").read_text())
+            self.assertEqual(relay["binding_thread_id"],
                              "00000000-0000-0000-0000-000000000001")
-            self.assertEqual(config["thread_id"],
+            self.assertEqual(relay["thread_id"],
                              "00000000-0000-0000-0000-000000000002")
-            self.assertFalse(config["enabled"])
+            self.assertEqual(notifier["binding_thread_id"], relay["binding_thread_id"])
+            self.assertEqual(notifier["thread_id"], relay["thread_id"])
+            self.assertFalse(relay["enabled"])
+            self.assertFalse(notifier["enabled"])
 
     def test_owner_contact_is_configurable_without_personal_default(self):
         self.assertEqual(owner_contact({}), "owner")

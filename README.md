@@ -54,7 +54,7 @@ py -3.12 -m venv .venv
 ## 启用顺序
 
 1. 在桌面上核实小号账号和微信窗口。通过获准的 Computer Use 获取实际窗口句柄，执行 `python watcher.py --initialize --hwnd VERIFIED_HANDLE --scale 1` 建立基线。缩放比例需与窗口实际布局一致，不能照抄别人的句柄或状态文件。
-2. 按 [手机接力说明](CLAWBOT_RELAY.md) 检查已有绑定，停止原生接收器。`setup_project.py --thread-id` 填写微信联系人原生映射的本地 Codex 对话 ID；如需隔离回复上下文，可用 `--relay-thread-id` 指定专用 Codex 对话。对应配置分别保存在私有 `binding_thread_id` 和 `thread_id` 字段。将本地 `clawbot_relay_config.json` 的 `enabled` 改为 `true`，执行 `python clawbot_relay.py --check`。
+2. 按 [手机接力说明](CLAWBOT_RELAY.md) 检查已有绑定，停止原生接收器。`setup_project.py --thread-id` 填写微信联系人原生映射的本地 Codex 对话 ID；如需隔离回复上下文，可用 `--relay-thread-id` 指定专用 Codex 对话。接力和提醒配置都应共享 `thread_id`（回复目标）与 `binding_thread_id`（微信身份绑定）。将本地 `clawbot_relay_config.json` 的 `enabled` 改为 `true`，执行 `python clawbot_relay.py --check`。
 3. 执行 `python monitor_control.py --panel`，使用面板单独开启手机接力。先从手机发送一条新测试消息并确认收到对应回复。
 4. 执行 `python wechat_notifier.py --activate`，为已有候选建立提醒基线，再开启面板中的本地检测。
 5. 用真实的新入站消息验证来信核对和手机反馈。API 接受请求或测试通过不代表手机已经收到消息。

@@ -21,7 +21,8 @@ def initialize(root, thread_id, owner_contact="owner", account_label="my-seconda
             "binding_thread_id": thread_id,
         },
         "wechat_notifier_config.json": {
-            "enabled": False, "thread_id": thread_id, "owner_contact": owner_contact,
+            "enabled": False, "thread_id": relay_thread_id,
+            "binding_thread_id": thread_id, "owner_contact": owner_contact,
             "carry_replies": False, "idle_seconds": 2, "wait_seconds": 1200,
             "max_batch_size": 8,
         },

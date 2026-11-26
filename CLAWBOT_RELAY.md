@@ -10,6 +10,9 @@ start another Codex CLI process, reset the conversation, or change permissions.
   matches `binding_thread_id` (falling back to `thread_id` for legacy config).
   `thread_id` is the local Codex conversation that receives the prompt and
   supplies the correlated answer; it may be a separate dedicated conversation.
+  The notifier config must use the same two fields so verification and relay
+  dispatch target the same dedicated conversation while preserving the native
+  owner identity binding.
 - Accept newly received plain text after first activation. Attachments, slash
   commands, other peers and historical messages are ignored.
 - Keep the target conversation open in desktop Codex and keep Codex++ running.
